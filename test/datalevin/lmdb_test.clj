@@ -432,7 +432,7 @@
                           (vswap! values conj
                                   (b/read-buffer (l/next-val iter) :long))
                           (recur (l/has-next-val iter)))))))]
-    (l/open-list-dbi lmdb "list")
+    (l/open-list-dbi lmdb "list" #_{:flags #{:create :counted :dupsort}})
     (is (l/list-dbi? lmdb "list"))
 
     (l/put-list-items lmdb "list" "a" [1 2 3 4] :string :long)
@@ -448,13 +448,14 @@
     (is (= "a b c" (s/trim @joins)))
 
     (is (= (l/key-range-list-count lmdb "list" [:all] :string) 10))
-    (is (= (l/key-range-list-count lmdb "list" [:all] :string 5) 7))
+    (is (= (l/key-range-list-count lmdb "list" [:all] :string 5) 5))
     (is (= (l/key-range-list-count lmdb "list" [:greater-than "a"] :string)
            6))
+    (is (= (l/key-range-list-count lmdb "list" [:closed "A" "d"] :string) 10))
+    (is (= (l/key-range-list-count lmdb "list" [:closed "a" "e"] :string) 10))
     (is (= (l/key-range-list-count lmdb "list" [:less-than "c"] :string)
            7))
-    (is (= (l/key-range-list-count lmdb "list" [:less-than "c"] :string 5)
-           7))
+    (is (= (l/key-range-list-count lmdb "list" [:less-than "c"] :string 5) 5))
 
     (is (= (l/key-range lmdb "list" [:all] :string) ["a" "b" "c"]))
     (is (= (l/key-range-count lmdb "list" [:greater-than "b"] :string) 1))
@@ -469,13 +470,14 @@
     (is (= [5 6] @values))
     (vreset! values [])
 
+    ;; we no longer support open boundary for list val
     (l/operate-list-val-range lmdb "list" (op-gen "b" :string)
-                              [:open-closed 5 6] :long)
-    (is (= [6] @values))
+                              [:closed 5 6] :long)
+    (is (= [5 6] @values))
     (vreset! values [])
 
     (l/operate-list-val-range lmdb "list"  (op-gen "d" :string)
-                              [:open-closed 5 6] :long)
+                              [:closed 5 6] :long)
     (is (= [] @values))
     (vreset! values [])
 

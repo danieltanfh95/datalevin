@@ -2,23 +2,53 @@
 
 ## WIP
 
+### Changed
+- [KV] KV storage is now [DLMDB](https://github.com/huahaiy/dlmdb), which has
+  additional features of counted DB
+  [#337](https://github.com/juji-io/datalevin/issues/337), prefix compression
+  and dupsort iterator optimizations. Stock LMDB can still be used on platforms
+  that do not have bundled DLMDB, though without benefits of the new features.
+- [KV] Default DBI flag is now `#{:create :counted :prefix-compression}`
+- [Vector] Vector index is now stored inside the database file and is ACID
+  compliant.
+- [Platform] Native dependencies are statically compiled and bundled in the
+  release jars.
+- [Platform] Drop support for Intel macOS.
+- [Platform] Minimal Java version is 21.
+
+### Added
+- [Platform] Automatically upgrade DB from version 0.9.12 onwards. The migration
+  may take a while when first opening the DB, and it needs Internet access.
+- [KV] DB wide option `:key-compression`, which compresses data with order
+  preserving Hu-Tucker coding. This also applies to DUPSORT values if enabled.
+- [KV] DB wide option `:value-compression`, which compresses with LZ4.
+- [KV] Random access and rank lookup functions in O(log n) time for
+  `:counted` DBIs.
+- [KV] Range count functions in O(log n) time for `:counted` DBIs.
+- [KV] Sampling functions in O(log n) time for `:counted` DBIs.
+
+### Fixed
+- [KV] Enable virtual threads usage by not reusing read only transactions
+  [#322](https://github.com/juji-io/datalevin/issues/322).
+- [Server] Faster code path for `pull` and `pull-many` on server
+  [#322](https://github.com/juji-io/datalevin/issues/322).
+
 ### Improved
-- [Server] Faster code path for `pull` and `pull-many` on server.
-  [#322](https://github.com/juji-io/datalevin/issues/322)
-- [KV] Explicitly close read/write transaction after commit instead of relying
-  on GC.
-- [KV] Put read only transactions back to the pool in "committed" or "aborted"
-  state rather than in "reset" state, so they do not hold up the readers
-  unnecessarily.
+- [Datalog] Cut query planning time in half due to faster range counts and
+  sampling of `:counted` feature in DLMDB.
+- [Datalog] Slightly reduced query execution time due to more optimized DLMDB
+  iterators.
+- [Datalog] Smaller DB size due to prefix compression and key/value compression.
 - [KV] Set default of `:max-readers` to 1024.
 
 ## 0.9.22 (2025-03-18)
 
-### Improved
+### Changed
+- [Platform] Update minimal version of Java to 17.
 
+### Improved
 - [Vector] Defer closing of vector indices until after async executor is
-  shutdown to avoid segfault due to trying to save a closed index.
-- Update minimal version of Java to 17.
+  shutdown to avoid segment fault due to trying to save a closed index.
 
 ## 0.9.21 (2025-03-18)
 

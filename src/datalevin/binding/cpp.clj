@@ -1,5 +1,4 @@
-;;
-;; Copyright (c) Huahai Yang. All rights reserved.
+;; ;; Copyright (c) Huahai Yang. All rights reserved.
 ;; The use and distribution terms for this software are covered by the
 ;; Eclipse Public License 2.0 (https://opensource.org/license/epl-2-0)
 ;; which can be found in the file LICENSE at the root of this distribution.
@@ -24,17 +23,19 @@
   (:import
    [datalevin.dtlvnative DTLV DTLV$MDB_envinfo DTLV$MDB_stat DTLV$dtlv_key_iter
     DTLV$dtlv_list_iter DTLV$dtlv_list_sample_iter DTLV$dtlv_list_val_iter
-    DTLV$dtlv_list_val_full_iter DTLV$MDB_val]
-   [datalevin.cpp BufVal Env Txn Dbi Cursor Stat Info Util
-    Util$BadReaderLockException Util$MapFullException]
+    DTLV$dtlv_list_rank_sample_iter DTLV$dtlv_list_val_full_iter DTLV$MDB_val
+    DTLV$dtlv_list_key_range_full_val_iter]
+   [datalevin.cpp BufVal Env Txn Dbi Cursor Stat Info Util Util$MapFullException]
    [datalevin.lmdb RangeContext KVTxData]
    [datalevin.async IAsyncWork]
-   [java.util.concurrent TimeUnit ScheduledExecutorService ScheduledFuture]
+   [datalevin.utl BitOps]
+   [java.util.concurrent TimeUnit ScheduledExecutorService ScheduledFuture
+    Semaphore]
    [java.lang AutoCloseable]
    [java.util Iterator HashMap ArrayDeque]
    [java.util.function Supplier]
    [java.nio BufferOverflowException ByteBuffer]
-   [org.bytedeco.javacpp SizeTPointer]
+   [org.bytedeco.javacpp SizeTPointer LongPointer]
    [clojure.lang IObj]))
 
 (defprotocol IPool
@@ -53,6 +54,15 @@
              (get [_] (ArrayDeque.))))))
 
 (defn- new-bufval [size] (BufVal. size))
+
+(defn- get-bufvals
+  [pools]
+  (if-let [^objects bvs (pool-take pools)]
+    (do (dotimes [i 6] (.clear ^BufVal (aget bvs i)))
+        bvs)
+    (let [bvs (object-array 6)]
+      (dotimes [i 6] (aset bvs i (new-bufval c/+max-key-size+)))
+      bvs)))
 
 (deftype KV [^BufVal kp ^BufVal vp]
   IKV
@@ -77,13 +87,15 @@
 
     :cp-compact DTLV/MDB_CP_COMPACT
 
-    :reversekey DTLV/MDB_REVERSEKEY
-    :dupsort    DTLV/MDB_DUPSORT
-    :integerkey DTLV/MDB_INTEGERKEY
-    :dupfixed   DTLV/MDB_DUPFIXED
-    :integerdup DTLV/MDB_INTEGERDUP
-    :reversedup DTLV/MDB_REVERSEDUP
-    :create     DTLV/MDB_CREATE
+    :reversekey         DTLV/MDB_REVERSEKEY
+    :dupsort            DTLV/MDB_DUPSORT
+    :integerkey         DTLV/MDB_INTEGERKEY
+    :dupfixed           DTLV/MDB_DUPFIXED
+    :integerdup         DTLV/MDB_INTEGERDUP
+    :reversedup         DTLV/MDB_REVERSEDUP
+    :create             DTLV/MDB_CREATE
+    :prefix-compression DTLV/MDB_PREFIX_COMPRESSION
+    :counted            DTLV/MDB_COUNTED
 
     :nooverwrite DTLV/MDB_NOOVERWRITE
     :nodupdata   DTLV/MDB_NODUPDATA
@@ -135,6 +147,7 @@
 
 (deftype Rtx [lmdb
               ^Txn txn
+              ^objects bvs
               ^BufVal kp
               ^BufVal vp
               ^BufVal start-kp
@@ -170,10 +183,7 @@
      (l/range-table v-range-type start-vp stop-vp)])
 
   IRtx
-  (read-only? [_] (.isReadOnly txn))
-  (close-rtx [_] (.close txn))
-  (reset [this] (.reset txn) this)
-  (renew [this] (.renew txn) this))
+  (read-only? [_] (.isReadOnly txn)))
 
 (defn- stat-map [^Stat stat]
   {:psize          (.ms_psize ^DTLV$MDB_stat (.get stat))
@@ -184,13 +194,15 @@
    :entries        (.ms_entries ^DTLV$MDB_stat (.get stat))})
 
 (declare ->KeyIterable ->ListIterable ->ListRandKeyValIterable
-         ->ListFullValIterable ->ListSampleIterable)
+         ->ListFullValIterable ->ListSampleIterable
+         ->ListKeyRangeFullValIterable)
 
 (deftype DBI [^Dbi db
               ^Pool curs
               ^BufVal kp
               ^:volatile-mutable ^BufVal vp
               ^boolean dupsort?
+              ^boolean counted?
               ^boolean validate-data?]
   IBuffer
   (put-key [this x t]
@@ -245,16 +257,17 @@
     (let [ctx (l/list-range-info rtx k-range-type k1 k2 k-type
                                  v-range-type v1 v2 v-type)]
       (->ListIterable this cur rtx ctx)))
-  (iterate-list-sample [this rtx cur indices budget step [k-range-type k1 k2]
-                        k-type [v-range-type v1 v2] v-type]
-    (let [ctx (l/list-range-info rtx k-range-type k1 k2 k-type
-                                 v-range-type v1 v2 v-type)]
+  (iterate-list-sample [this rtx cur indices budget step [k-range-type k1 k2] k-type]
+    (let [ctx (l/range-info rtx k-range-type k1 k2 k-type)]
       (->ListSampleIterable this indices budget step cur rtx ctx)))
   (iterate-list-val [this rtx cur [v-range-type v1 v2] v-type]
     (let [ctx (l/range-info rtx v-range-type v1 v2 v-type)]
       (->ListRandKeyValIterable this cur rtx ctx)))
   (iterate-list-val-full [this rtx cur]
     (->ListFullValIterable this cur rtx))
+  (iterate-list-key-range-val-full [this rtx cur [range-type k1 k2] k-type]
+    (let [ctx (l/range-info rtx range-type k1 k2 k-type)]
+      (->ListKeyRangeFullValIterable this cur rtx ctx)))
   (iterate-kv [this rtx cur k-range k-type v-type]
     (if dupsort?
       (.iterate-list this rtx cur k-range k-type [:all] v-type)
@@ -353,40 +366,41 @@
                              ^long step
                              ^Cursor cur
                              ^Rtx rtx
-                             ctx]
+                             ^RangeContext ctx]
   Iterable
   (iterator [_]
-    (let [[^RangeContext kctx ^RangeContext vctx] ctx
-
-          forward-key?       (dtlv-bool (.-forward? kctx))
-          include-start-key? (dtlv-bool (.-include-start? kctx))
-          include-stop-key?  (dtlv-bool (.-include-stop? kctx))
-          sk                 (dtlv-val (.-start-bf kctx))
-          ek                 (dtlv-val (.-stop-bf kctx))
-          forward-val?       (dtlv-bool (.-forward? vctx))
-          include-start-val? (dtlv-bool (.-include-start? vctx))
-          include-stop-val?  (dtlv-bool (.-include-stop? vctx))
-          sv                 (dtlv-val (.-start-bf vctx))
-          ev                 (dtlv-val (.-stop-bf vctx))
-          k                  (.key cur)
-          v                  (.val cur)
-          iter               (DTLV$dtlv_list_sample_iter.)
-          samples            (alength indices)
-          sizets             (SizeTPointer. samples)]
+    (let [sk      (dtlv-val (.-start-bf ctx))
+          ek      (dtlv-val (.-stop-bf ctx))
+          k       (.key cur)
+          v       (.val cur)
+          iter    (if (l/dlmdb?)
+                    (DTLV$dtlv_list_rank_sample_iter.)
+                    (DTLV$dtlv_list_sample_iter.))
+          samples (alength indices)
+          sizets  (SizeTPointer. samples)]
       (dotimes [i samples] (.put sizets i (aget indices i)))
       (Util/checkRc
-        (DTLV/dtlv_list_sample_iter_create
-          iter sizets samples budget step (.ptr cur) (.ptr k) (.ptr v)
-          ^int forward-key? ^int include-start-key? ^int include-stop-key? sk ek
-          ^int forward-val? ^int include-start-val? ^int include-stop-val?
-          sv ev))
+        (if (l/dlmdb?)
+          (DTLV/dtlv_list_rank_sample_iter_create
+            ^DTLV$dtlv_list_rank_sample_iter iter
+            sizets samples (.ptr cur) (.ptr k) (.ptr v) sk ek)
+          (DTLV/dtlv_list_sample_iter_create
+            ^DTLV$dtlv_list_sample_iter iter
+            sizets samples budget step (.ptr cur) (.ptr k) (.ptr v) sk ek)))
       (reify
         Iterator
-        (hasNext [_] (dtlv-rc (DTLV/dtlv_list_sample_iter_has_next iter)))
+        (hasNext [_]
+          (dtlv-rc
+            (if (l/dlmdb?)
+              (DTLV/dtlv_list_rank_sample_iter_has_next iter)
+              (DTLV/dtlv_list_sample_iter_has_next iter))))
         (next [_] (KV. k v))
 
         AutoCloseable
-        (close [_] (DTLV/dtlv_list_sample_iter_destroy iter))))))
+        (close [_]
+          (if (l/dlmdb?)
+            (DTLV/dtlv_list_rank_sample_iter_destroy iter)
+            (DTLV/dtlv_list_sample_iter_destroy iter)))))))
 
 (deftype ListRandKeyValIterable [^DBI db
                                  ^Cursor cur
@@ -394,17 +408,13 @@
                                  ^RangeContext ctx]
   IListRandKeyValIterable
   (val-iterator [_]
-    (let [include-start-val? (dtlv-bool (.-include-start? ctx))
-          include-stop-val?  (dtlv-bool (.-include-stop? ctx))
-          sv                 (dtlv-val (.-start-bf ctx))
-          ev                 (dtlv-val (.-stop-bf ctx))
-          ^BufVal k          (.key cur)
-          ^BufVal v          (.val cur)
-          iter               (DTLV$dtlv_list_val_iter.)]
+    (let [sv        (dtlv-val (.-start-bf ctx))
+          ev        (dtlv-val (.-stop-bf ctx))
+          ^BufVal k (.key cur)
+          ^BufVal v (.val cur)
+          iter      (DTLV$dtlv_list_val_iter.)]
       (Util/checkRc
-        (DTLV/dtlv_list_val_iter_create
-          iter (.ptr cur) (.ptr k) (.ptr v)
-          ^int include-start-val? ^int include-stop-val? sv ev))
+        (DTLV/dtlv_list_val_iter_create iter (.ptr cur) (.ptr k) (.ptr v) sv ev))
       (reify
         IListRandKeyValIterator
         (seek-key [_ x t]
@@ -415,6 +425,32 @@
 
         AutoCloseable
         (close [_] (DTLV/dtlv_list_val_iter_destroy iter))))))
+
+(deftype ListKeyRangeFullValIterable [^DBI db
+                                      ^Cursor cur
+                                      ^Rtx rtx
+                                      ^RangeContext ctx]
+  Iterable
+  (iterator [_]
+    (let [include-start? (dtlv-bool (.-include-start? ctx))
+          include-stop?  (dtlv-bool (.-include-stop? ctx))
+          sk             (dtlv-val (.-start-bf ctx))
+          ek             (dtlv-val (.-stop-bf ctx))
+          k              (.key cur)
+          v              (.val cur)
+          iter           (DTLV$dtlv_list_key_range_full_val_iter.)]
+      (Util/checkRc
+        (DTLV/dtlv_list_key_range_full_val_iter_create
+          iter (.ptr cur) (.ptr k) (.ptr v)
+          ^int include-start? ^int include-stop? sk ek))
+      (reify
+        Iterator
+        (hasNext [_]
+          (dtlv-rc (DTLV/dtlv_list_key_range_full_val_iter_has_next iter)))
+        (next [_] (KV. k v))
+
+        AutoCloseable
+        (close [_] (DTLV/dtlv_list_key_range_full_val_iter_destroy iter))))))
 
 (deftype ListFullValIterable [^DBI db
                               ^Cursor cur
@@ -532,9 +568,12 @@
     (.cancel ^ScheduledFuture fut true)
     (vreset! scheduled-sync nil)))
 
+(declare key-range-list-count-fast key-range-list-count-slow)
+
 (deftype CppLMDB [^Env env
                   info
                   ^Pool pools
+                  ^Semaphore readers
                   ^HashMap dbis
                   scheduled-sync
                   ^BufVal kp-w
@@ -554,7 +593,7 @@
 
   (mark-write [_]
     (->CppLMDB
-      env info pools dbis scheduled-sync kp-w vp-w start-kp-w
+      env info pools readers dbis scheduled-sync kp-w vp-w start-kp-w
       stop-kp-w start-vp-w stop-vp-w write-txn true meta))
 
   IObj
@@ -568,7 +607,7 @@
       (swap! l/lmdb-dirs disj (l/dir this))
       (when (zero? (count @l/lmdb-dirs))
         (a/shutdown-executor)
-        (u/shutdown-query-thread-pool)
+        (u/shutdown-worker-thread-pool)
         (u/shutdown-scheduler))
       (.sync env 1)
       (.close env)
@@ -589,29 +628,27 @@
 
   (open-dbi [this dbi-name]
     (.open-dbi this dbi-name nil))
-  (open-dbi [this dbi-name {:keys [key-size val-size flags validate-data?
-                                   dupsort?]
+  (open-dbi [this dbi-name {:keys [key-size val-size flags validate-data?]
                             :or   {key-size       c/+max-key-size+
                                    val-size       c/*init-val-size*
                                    flags          c/default-dbi-flags
-                                   dupsort?       false
                                    validate-data? false}}]
     (.check-ready this)
     (assert (< ^long key-size 512) "Key size cannot be greater than 511 bytes")
     (let [{info-dbis :dbis max-dbis :max-dbs} @info]
       (if (< (count info-dbis) ^long max-dbis)
-        (let [opts (merge (get info-dbis dbi-name)
-                          {:key-size       key-size
-                           :val-size       val-size
-                           :flags          flags
-                           :dupsort?       dupsort?
-                           :validate-data? validate-data?})
-              kp   (new-bufval key-size)
-              vp   (new-bufval val-size)
-              dbi  (Dbi/create env dbi-name
-                               (kv-flags (if dupsort? (conj flags :dupsort) flags)))
-              db   (DBI. dbi (new-pools) kp vp
-                         dupsort? validate-data?)]
+        (let [opts     (merge (get info-dbis dbi-name)
+                              {:key-size       key-size
+                               :val-size       val-size
+                               :flags          flags
+                               :validate-data? validate-data?})
+              flags    (set flags)
+              dupsort? (if (:dupsort flags) true false)
+              counted? (if (:counted flags) true false)
+              kp       (new-bufval key-size)
+              vp       (new-bufval val-size)
+              dbi      (Dbi/create env dbi-name (kv-flags flags))
+              db       (DBI. dbi (new-pools) kp vp dupsort? counted? validate-data?)]
           (when (not= dbi-name c/kv-info)
             (vswap! info assoc-in [:dbis dbi-name] opts)
             (l/transact-kv this [(l/kv-tx :put c/kv-info [:dbis dbi-name] opts
@@ -668,29 +705,32 @@
       (raise "Destination directory is not empty." {})))
 
   (get-rtx [this]
-    (or (when-let [^Rtx rtx (pool-take pools)]
-          (try
-            (.reset rtx)
-            (.renew rtx)
-            (catch Util$BadReaderLockException _
-              (raise
-                "Please do not open multiple LMDB connections to the same DB
-           in the same process. Instead, a LMDB connection should be held onto
-           and managed like a stateful resource. Refer to the documentation of
-           `datalevin.core/open-kv` for more details." {}))))
+    (try
+      (let [^objects bvs (get-bufvals pools)]
+        (.acquire readers)
         (Rtx. this
               (Txn/createReadOnly env)
-              (new-bufval c/+max-key-size+)
-              (new-bufval 0)
-              (new-bufval c/+max-key-size+)
-              (new-bufval c/+max-key-size+)
-              (new-bufval c/+max-key-size+)
-              (new-bufval c/+max-key-size+)
-              (volatile! false))))
+              bvs
+              (aget bvs 0)
+              (aget bvs 1)
+              (aget bvs 2)
+              (aget bvs 3)
+              (aget bvs 4)
+              (aget bvs 5)
+              (volatile! false)))
+      (catch Exception e
+        (raise
+          "Please do not open multiple LMDB connections to the same DB
+           in the same process. Instead, a LMDB connection should be held onto
+           and managed like a stateful resource. Refer to the documentation of
+           `datalevin.core/open-kv` for more details."
+          {:cause (.getMessage e)}))))
 
   (return-rtx [this rtx]
     (when-not  (.closed-kv? this)
-      (pool-add pools rtx)))
+      (.abort ^Txn (.-txn  ^Rtx rtx))
+      (.release readers)
+      (pool-add pools (.-bvs ^Rtx rtx))))
 
   (stat [_]
     (try
@@ -958,15 +998,17 @@
   (visit [this dbi-name visitor k-range k-type v-type raw-pred?]
     (scan/visit this dbi-name visitor k-range k-type v-type raw-pred?))
 
-  (open-list-dbi [this dbi-name {:keys [key-size val-size]
+  (open-list-dbi [this dbi-name {:keys [key-size val-size flags]
                                  :or   {key-size c/+max-key-size+
-                                        val-size c/+max-key-size+}}]
+                                        val-size c/+max-key-size+
+                                        flags    c/default-dbi-flags}}]
     (.check-ready this)
     (assert (and (>= c/+max-key-size+ ^long key-size)
                  (>= c/+max-key-size+ ^long val-size))
             "Data size cannot be larger than 511 bytes")
     (.open-dbi this dbi-name
-               {:key-size key-size :val-size val-size :dupsort? true}))
+               {:key-size key-size :val-size val-size
+                :flags    (conj flags :dupsort)}))
   (open-list-dbi [lmdb dbi-name]
     (.open-list-dbi lmdb dbi-name nil))
 
@@ -1017,32 +1059,10 @@
     (.key-range-list-count lmdb dbi-name k-range k-type nil nil))
   (key-range-list-count [lmdb dbi-name k-range k-type cap]
     (.key-range-list-count lmdb dbi-name k-range k-type cap nil))
-  (key-range-list-count [lmdb dbi-name [range-type k1 k2] k-type cap budget]
-    (scan/scan
-      (let [^RangeContext ctx (l/range-info rtx range-type k1 k2 k-type)
-            forward           (dtlv-bool (.-forward? ctx))
-            start             (dtlv-bool (.-include-start? ctx))
-            end               (dtlv-bool (.-include-stop? ctx))
-            sk                (dtlv-val (.-start-bf ctx))
-            ek                (dtlv-val (.-stop-bf ctx))]
-        (dtlv-c
-          (cond
-            budget
-            (DTLV/dtlv_key_range_list_count_cap_budget
-              (.ptr ^Cursor cur) cap budget c/range-count-iteration-step
-              (.ptr ^BufVal (.-kp ^Rtx rtx)) (.ptr ^BufVal (.-vp ^Rtx rtx))
-              forward start end sk ek)
-            cap
-            (DTLV/dtlv_key_range_list_count_cap
-              (.ptr ^Cursor cur) cap
-              (.ptr ^BufVal (.-kp ^Rtx rtx)) (.ptr ^BufVal (.-vp ^Rtx rtx))
-              forward start end sk ek)
-            :else
-            (DTLV/dtlv_key_range_list_count
-              (.ptr ^Cursor cur)
-              (.ptr ^BufVal (.-kp ^Rtx rtx)) (.ptr ^BufVal (.-vp ^Rtx rtx))
-              forward start end sk ek))))
-      (raise "Fail to count list in key range: " e {:dbi dbi-name})))
+  (key-range-list-count [lmdb dbi-name k-range k-type cap budget]
+    (if (l/dlmdb?)
+      (key-range-list-count-fast lmdb dbi-name k-range k-type cap)
+      (key-range-list-count-slow lmdb dbi-name k-range k-type cap budget)))
 
   (list-range [this dbi-name k-range kt v-range vt]
     (scan/list-range this dbi-name k-range kt v-range vt))
@@ -1121,14 +1141,23 @@
     (scan/visit-list-range this dbi-name visitor k-range kt v-range
                            vt raw-pred?))
 
+  (visit-list-key-range
+    [this dbi-name visitor k-range k-type v-type]
+    (.visit-list-key-range this dbi-name visitor k-range k-type
+                           v-type true))
+  (visit-list-key-range
+    [this dbi-name visitor k-range k-type v-type raw-pred?]
+    (scan/visit-list-key-range this dbi-name visitor k-range k-type
+                               v-type raw-pred?))
+
   (visit-list-sample
-    [this list-name indices budget step visitor k-range k-type v-range v-type]
+    [this list-name indices budget step visitor k-range k-type v-type]
     (.visit-list-sample this list-name indices budget step visitor k-range
-                        k-type v-range v-type true))
+                        k-type v-type true))
   (visit-list-sample
-    [this dbi-name indices budget step visitor k-range kt v-range vt raw-pred?]
+    [this dbi-name indices budget step visitor k-range kt vt raw-pred?]
     (scan/visit-list-sample this dbi-name indices budget step visitor k-range
-                            kt v-range vt raw-pred?))
+                            kt vt raw-pred?))
 
   (operate-list-val-range
     [this dbi-name operator v-range vt]
@@ -1136,6 +1165,53 @@
 
   IAdmin
   (re-index [this opts] (l/re-index* this opts)))
+
+(defn- key-range-list-count-fast
+  [lmdb dbi-name [range-type k1 k2] k-type cap]
+  (scan/scan
+    (let [^RangeContext ctx (l/range-info rtx range-type k1 k2 k-type)
+          flag              (BitOps/intOr
+                              (if (.-include-start? ctx)
+                                (int DTLV/MDB_COUNT_LOWER_INCL) 0)
+                              (if (.-include-stop? ctx)
+                                (int DTLV/MDB_COUNT_UPPER_INCL) 0))]
+      (with-open [ptr (LongPointer. 1)]
+        (DTLV/mdb_range_count_values
+          (.get ^Txn (.-txn ^Rtx rtx)) (.get ^Dbi (.-db ^DBI dbi))
+          (dtlv-val (.-start-bf ctx)) (dtlv-val (.-stop-bf ctx))
+          flag ptr)
+        (let [res (.get ^LongPointer ptr)]
+          (if (and cap (> ^long res ^long cap)) cap res))))
+    (raise "Fail to count (fast) list in key range: " e {:dbi dbi-name})))
+
+(defn- key-range-list-count-slow
+  [lmdb dbi-name [range-type k1 k2] k-type cap budget]
+  (scan/scan
+    (let [^RangeContext ctx (l/range-info rtx range-type k1 k2 k-type)
+          forward           (dtlv-bool (.-forward? ctx))
+          start             (dtlv-bool (.-include-start? ctx))
+          end               (dtlv-bool (.-include-stop? ctx))
+          sk                (dtlv-val (.-start-bf ctx))
+          ek                (dtlv-val (.-stop-bf ctx))]
+      (dtlv-c
+        (cond
+          budget
+          (DTLV/dtlv_key_range_list_count_cap_budget
+            (.ptr ^Cursor cur) cap budget c/range-count-iteration-step
+            (.ptr ^BufVal (.-kp ^Rtx rtx)) (.ptr ^BufVal (.-vp ^Rtx rtx))
+            forward start end sk ek)
+          cap
+          (let [res (DTLV/dtlv_key_range_list_count_cap
+                      (.ptr ^Cursor cur) cap
+                      (.ptr ^BufVal (.-kp ^Rtx rtx)) (.ptr ^BufVal (.-vp ^Rtx rtx))
+                      forward start end sk ek)]
+            (if (> ^long res ^long cap) cap res))
+          :else
+          (DTLV/dtlv_key_range_list_count
+            (.ptr ^Cursor cur)
+            (.ptr ^BufVal (.-kp ^Rtx rtx)) (.ptr ^BufVal (.-vp ^Rtx rtx))
+            forward start end sk ek))))
+    (raise "Fail to count (slow) list in key range: " e {:dbi dbi-name})))
 
 (defn- create-rw-txn [^CppLMDB lmdb] (Txn/create (.-env lmdb)))
 
@@ -1156,6 +1232,7 @@
     (vreset! (.-write-txn lmdb)
              (Rtx. lmdb
                    (create-rw-txn lmdb)
+                   nil
                    kp-w
                    vp-w
                    start-kp-w
@@ -1212,6 +1289,7 @@
            ^CppLMDB lmdb (->CppLMDB env
                                     (volatile! info)
                                     (new-pools)
+                                    (Semaphore. max-readers)
                                     (HashMap.)
                                     (volatile! nil)
                                     (new-bufval c/+max-key-size+)

@@ -20,7 +20,8 @@
     IFn$OOL]
    [org.eclipse.collections.impl.list.mutable FastList]
    [java.util Random Arrays Iterator List]
-   [java.util.concurrent Executors ExecutorService Future TimeUnit]
+   [java.util.concurrent Executors ExecutorService Future TimeUnit
+    ThreadPoolExecutor ThreadPoolExecutor$CallerRunsPolicy ArrayBlockingQueue]
    [java.io File]
    [java.nio.file Files Paths LinkOption AccessDeniedException]
    [java.nio.file.attribute PosixFilePermissions FileAttribute]))
@@ -28,21 +29,27 @@
 ;; for when we need to use datalevin specific print method
 (def ^:dynamic *datalevin-print* false)
 
-(defonce query-thread-pool-atom (atom nil))
+(defonce worker-thread-pool-atom (atom nil))
 
-(defn get-query-thread-pool
+(defn- ioPool
+  []
+  (let [threads (* 4 (.availableProcessors (Runtime/getRuntime)))]
+    (ThreadPoolExecutor.
+      threads threads 0 TimeUnit/MILLISECONDS
+      (ArrayBlockingQueue. (* 4 threads))       ; bounded queue
+      (ThreadPoolExecutor$CallerRunsPolicy.)))) ; backpressure
+
+(defn get-worker-thread-pool
   "access the thread pool for parallel query processing"
   []
-  (let [pool @query-thread-pool-atom]
+  (let [pool @worker-thread-pool-atom]
     (if (or (nil? pool) (.isShutdown ^ExecutorService pool))
-      (reset! query-thread-pool-atom
-              (Executors/newFixedThreadPool
-                (* 2 (.availableProcessors (Runtime/getRuntime)))))
+      (reset! worker-thread-pool-atom (ioPool))
       pool)))
 
-(defn shutdown-query-thread-pool
+(defn shutdown-worker-thread-pool
   []
-  (when-let [^ExecutorService pool @query-thread-pool-atom]
+  (when-let [^ExecutorService pool @worker-thread-pool-atom]
     (.shutdownNow pool)
     (.awaitTermination pool 5 TimeUnit/MILLISECONDS)))
 
@@ -172,7 +179,6 @@
        total)
      (+ total (.length file)))))
 
-;;(def +tmp+ "/mnt/tmpfs/")
 (def +tmp+
   (s/escape (let [path (System/getProperty "java.io.tmpdir")]
               (if-not (s/ends-with? path +separator+)
@@ -634,12 +640,17 @@
 
 #_(def map+ map)
 (defn map+
-  "parallel map using query-thread-pool"
+  "parallel map using worker-thread-pool"
   ([f coll]
-   (let [pool ^ExecutorService (get-query-thread-pool)
+   (let [pool ^ExecutorService (get-worker-thread-pool)
          futs (.invokeAll pool (mapv (fn [e] #(f e)) coll))]
      (mapv #(.get ^Future %) futs)))
   ([f c1 c2]
-   (let [pool ^ExecutorService (get-query-thread-pool)
+   (let [pool ^ExecutorService (get-worker-thread-pool)
          futs (.invokeAll pool (mapv (fn [e1 e2] #(f e1 e2)) c1 c2))]
      (mapv #(.get ^Future %) futs))))
+
+(defn supports-virtual-threads?
+  "Returns true when the running JVM is 21+ (Loom / virtual threads)."
+  []
+  (>= (.feature (Runtime/version)) 21))

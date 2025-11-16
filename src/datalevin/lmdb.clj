@@ -12,6 +12,7 @@
   (:refer-clojure :exclude [load sync])
   (:require
    [clojure.edn :as edn]
+   [clojure.string :as s]
    [clojure.pprint :as p]
    [taoensso.nippy :as nippy]
    [datalevin.bits :as b]
@@ -22,6 +23,7 @@
   (:import
    [clojure.lang IPersistentVector]
    [datalevin.utl BitOps]
+   [datalevin.cpp Util]
    [java.nio ByteBuffer]
    [java.io Writer PushbackReader FileOutputStream FileInputStream DataOutputStream
     DataInputStream IOException]
@@ -38,10 +40,7 @@
     "return key value range information for list iterators"))
 
 (defprotocol IRtx
-  (read-only? [this] "is this a read only transaction")
-  (close-rtx [this] "close the transaction")
-  (reset [this] "reset transaction so it can be reused upon renew")
-  (renew [this] "renew and return previously reset transaction for reuse"))
+  (read-only? [this] "is this a read only transaction"))
 
 (defprotocol IDB
   (dbi [this] "Return the underlying dbi")
@@ -60,9 +59,12 @@
     "Return an Iterable of key-values given key range and value range,
      applicable only to list dbi")
   (iterate-list-sample
-    [this rtx cur indices budget step k-range k-type v-range v-type]
-    "Return an Iterable of a sample of key-values given key range and value range,
+    [this rtx cur indices budget step k-range k-type]
+    "Return an Iterable of a sample of key-values given key range,
      and an array of indices, applicable only to list dbi")
+  (iterate-list-key-range-val-full [this crt cur k-range k-type]
+    "Return an Iterable that walks all values of given key range forwardly,
+     applicable only to list dbi")
   (iterate-list-val [this rtx cur v-range v-type]
     "Return a IListRandKeyValIterable given the value range,
      which allows randomly seek key and iterate its values forwardly,
@@ -142,9 +144,13 @@
     [db list-name visitor k-range k-type v-range v-type]
     [db list-name visitor k-range k-type v-range v-type raw-pred?]
     "visit a list range, presumably for side effects of vistor call")
+  (visit-list-key-range
+    [db list-name visitor k-range k-type v-type]
+    [db list-name visitor k-range k-type v-type raw-pred?]
+    "visit a list key range, presumably for side effects of vistor call")
   (visit-list-sample
-    [db list-name indices budget step visitor k-range k-type v-range v-type]
-    [db list-name indices budget step visitor k-range k-type v-range v-type
+    [db list-name indices budget step visitor k-range k-type v-type]
+    [db list-name indices budget step visitor k-range k-type v-type
      raw-pred?]
     "visit a list range, presumably for side effects of vistor call")
   (operate-list-val-range
@@ -432,7 +438,8 @@ values;")
        (set (list-dbis lmdb)))
      (dump-dbis-list lmdb))))
 
-(defn list-dbi? [db dbi-name] (:dupsort? (dbi-opts db dbi-name)))
+(defn list-dbi? [db dbi-name]
+  (get-in (dbi-opts db dbi-name) [:flags :dupsort]))
 
 (defn sample-key-freqs
   "return a long array of frequencies of 2 bytes symbols if there are enough
@@ -647,3 +654,6 @@ values;")
 
 ;; for freeing in memory vector index when a LMDB exits
 (defonce vector-indices (atom {}))  ; fname -> index
+
+;; check if db is backed by DLMDB (rather than stock LMDB)
+(defonce dlmdb? (memoize (fn [] (s/starts-with? (Util/version) "D"))))

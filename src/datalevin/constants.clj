@@ -67,8 +67,8 @@
   #{:nordahead :notls})
 
 (def default-dbi-flags
-  "Default LMDB dbi flag is `#{:create}`. See http://www.lmdb.tech/doc/group__mdb__dbi__open.html for full list of flags"
-  #{:create})
+  "Default DBI flags is `#{:create :counted :prefix-compression}`. See http://www.lmdb.tech/doc/group__mdb__dbi__open.html for a list of flags for stock LMDB, and https://github.com/huahaiy/dlmdb for additional flags."
+  #{:create :counted :prefix-compression})
 
 (def default-put-flags
   "Default LMDB put flag is `#{}`. See http://www.lmdb.tech/doc/group__mdb__put.html for full list of flags"
@@ -101,7 +101,7 @@
 
 ;; index storage
 
-(def ^:no-doc ^:const +val-bytes-wo-hdr+ 497)  ; - hdr - s - g - a
+(def ^:no-doc ^:const +val-bytes-wo-hdr+ 497)  ; - hdr - g - a - g?
 (def ^:no-doc ^:const +val-bytes-trunc+  496)  ; - tr
 
 (def ^:no-doc ^:const +id-bytes+ Long/BYTES)
@@ -408,8 +408,16 @@
 ;; datalog query engine
 
 (def ^{:dynamic true
+       :doc     "Size reduction a predicate induces during scan"}
+  magic-size-pred 0.7)
+
+(def ^{:dynamic true
+       :doc     "Size reduction a filter induces during scan"}
+  magic-size-fidx 0.8)
+
+(def ^{:dynamic true
        :doc     "Cost associated with running a predicate during scan"}
-  magic-cost-pred 2.0)
+  magic-cost-pred 3.0)
 
 (def ^{:dynamic true
        :doc     "Cost associated with adding variable during scan"}
@@ -425,11 +433,11 @@
 
 (def ^{:dynamic true
        :doc     "Cost associated with merge-scan join"}
-  magic-cost-merge-scan-v 2.5)
+  magic-cost-merge-scan-v 5.0)
 
 (def ^{:dynamic true
        :doc     "Cost associated with val-eq-scan join"}
-  magic-cost-val-eq-scan-e 4.0)
+  magic-cost-val-eq-scan-e 3.0)
 
 (def ^{:dynamic true
        :doc     "Size below which the initial plan will execute during planning,

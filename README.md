@@ -72,7 +72,7 @@ performance, which is [competitive](benchmarks/JOB-bench) with popular SQL RDBMS
 such as PostgreSQL.
 
 Datalevin provides robust ACID transaction features on the basis of
-[LMDB](https://en.wikipedia.org/wiki/Lightning_Memory-Mapped_Database), known
+[our fork](https://github.com/huahaiy/dlmdb) of [LMDB](https://en.wikipedia.org/wiki/Lightning_Memory-Mapped_Database), known
 for its high read performance. With built-in support of asynchronous
 transaction, Datalevin can also handle [write](benchmarks/write-bench) intensive
 workload, as well as storing large documents.
@@ -294,7 +294,7 @@ the average times:
 <img src="benchmarks/JOB-bench/means.png" alt="JOB benchmark averages" height="300"></img>
 </p>
 
-Datalevin is about 1.3X faster than PostgreSQL on average in running the complex
+Datalevin is about 2X faster than PostgreSQL on average in running the complex
 queries that involves many joins. The gain is mainly due to shorter query
 execution time as Datalevin's query optimizer generates better plans. Details of
 the analysis can be found in [this
@@ -332,10 +332,13 @@ adjust the priorities based on feedback.
   [Done 2023/01/19]
 * 0.9.0 ~~New Datalog query engine with improved performance.~~ [Done 2024/03/09]
 * 0.10.0 ~~Async transaction; boolean search expression and phrase search; as a
-  vector database;~~ TTL for KV DB; extensible de/serialization for arbitrary data; auto upgrade migration; compressed data storage.
-* 1.0.0 New rule evaluation algorithm and incremental view maintenance.
-* 1.1.0 Transaction log storage and access API; read-only replicas for server.
-* 1.2.0 JSON API and library/client for popular languages.
+  vector database;~~reduced Datalog query planning time on the basis of DLMDB;
+  compressed data storage; auto upgrade migration.
+* 0.11.0 New rule evaluation algorithm and incremental view maintenance.
+* 1.0.0  TTL for both KV and Datalog values; extensible de/serialization for
+  arbitrary data.
+* 1.1.0 JSON API and library/client for popular languages.
+* 1.2.0 Transaction log storage and access API; read-only replicas for server.
 * 2.0.0 Automatic document indexing.
 * 3.0.0 Distributed mode.
 

@@ -459,67 +459,71 @@
       cat)
     (d/read-csv reader)))
 
-;; initial loading of data, may take up to 20 minutes
-#_(def db
-    (with-open [movie-info-rdr     (io/reader "data/movie_info.csv")
-                movie-info-idx-rdr (io/reader "data/movie_info_idx.csv")
-                movie-keyword-rdr  (io/reader "data/movie_keyword.csv")
-                name-rdr           (io/reader "data/name.csv")
-                person-info-rdr    (io/reader "data/person_info.csv")
-                title-rdr          (io/reader "data/title.csv")
-                cast-info-rdr      (io/reader "data/cast_info.csv")]
-      (let [start (atom (System/currentTimeMillis))
-            show  (fn [db label]
-                    (let [now (System/currentTimeMillis)]
-                      (println label "took" (- now @start))
-                      (reset! start now))
-                    db)]
-        (-> (d/empty-db "db" schema {:closed-schema? true
-                                     :kv-opts        {:mapsize 100000}})
-            (show "empty db")
-            (d/fill-db (add-comp-cast-type))
-            (show "comp-cast-type")
-            (d/fill-db (add-company-type))
-            (show "company-type")
-            (d/fill-db (add-kind-type))
-            (show "kind-type")
-            (d/fill-db (add-link-type))
-            (show "link-type")
-            (d/fill-db (add-role-type))
-            (show "role-type")
-            (d/fill-db (add-info-type))
-            (show "info-type")
-            (d/fill-db (add-movie-link))
-            (show "movie-link")
-            (d/fill-db (add-aka-name))
-            (show "aka-name")
-            (d/fill-db (add-aka-title))
-            (show "aka-title")
-            (d/fill-db (add-company-name))
-            (show "company-name")
-            (d/fill-db (add-complete-cast))
-            (show "complete-cast")
-            (d/fill-db (add-keyword))
-            (show "keyword")
-            (d/fill-db (add-char-name))
-            (show "char-name")
-            (d/fill-db (add-movie-companies))
-            (show "movie-companies")
-            (d/fill-db (add-movie-info movie-info-rdr))
-            (show "movie-info")
-            (d/fill-db (add-movie-info-idx movie-info-idx-rdr))
-            (show "movie-info-idx")
-            (d/fill-db (add-movie-keyword movie-keyword-rdr))
-            (show "movie-keyword")
-            (d/fill-db (add-name name-rdr))
-            (show "name")
-            (d/fill-db (add-person-info person-info-rdr))
-            (show "person-info")
-            (d/fill-db (add-title title-rdr))
-            (show "title")
-            (d/fill-db (add-cast-info cast-info-rdr))
-            (show "cast-info")
-            ))))
+(defn db [&opts]
+  (println "Loading data to db, please wait up to 30 minutes...")
+  (with-open [movie-info-rdr     (io/reader "data/movie_info.csv")
+              movie-info-idx-rdr (io/reader "data/movie_info_idx.csv")
+              movie-keyword-rdr  (io/reader "data/movie_keyword.csv")
+              name-rdr           (io/reader "data/name.csv")
+              person-info-rdr    (io/reader "data/person_info.csv")
+              title-rdr          (io/reader "data/title.csv")
+              cast-info-rdr      (io/reader "data/cast_info.csv")]
+    (let [start (atom (System/currentTimeMillis))
+          show  (fn [db label]
+                  (let [now (System/currentTimeMillis)]
+                    (println label "took" (- now @start))
+                    (reset! start now))
+                  db)
+          db
+          ;; hard-code dir to be "db" for now
+          (-> (d/empty-db "db" schema {:closed-schema? true
+                                       :kv-opts        {:mapsize 100000}})
+              (show "empty db")
+              (d/fill-db (add-comp-cast-type))
+              (show "comp-cast-type")
+              (d/fill-db (add-company-type))
+              (show "company-type")
+              (d/fill-db (add-kind-type))
+              (show "kind-type")
+              (d/fill-db (add-link-type))
+              (show "link-type")
+              (d/fill-db (add-role-type))
+              (show "role-type")
+              (d/fill-db (add-info-type))
+              (show "info-type")
+              (d/fill-db (add-movie-link))
+              (show "movie-link")
+              (d/fill-db (add-aka-name))
+              (show "aka-name")
+              (d/fill-db (add-aka-title))
+              (show "aka-title")
+              (d/fill-db (add-company-name))
+              (show "company-name")
+              (d/fill-db (add-complete-cast))
+              (show "complete-cast")
+              (d/fill-db (add-keyword))
+              (show "keyword")
+              (d/fill-db (add-char-name))
+              (show "char-name")
+              (d/fill-db (add-movie-companies))
+              (show "movie-companies")
+              (d/fill-db (add-movie-info movie-info-rdr))
+              (show "movie-info")
+              (d/fill-db (add-movie-info-idx movie-info-idx-rdr))
+              (show "movie-info-idx")
+              (d/fill-db (add-movie-keyword movie-keyword-rdr))
+              (show "movie-keyword")
+              (d/fill-db (add-name name-rdr))
+              (show "name")
+              (d/fill-db (add-person-info person-info-rdr))
+              (show "person-info")
+              (d/fill-db (add-title title-rdr))
+              (show "title")
+              (d/fill-db (add-cast-info cast-info-rdr))
+              (show "cast-info")
+              )]
+      (d/close-db db)
+      (println "Done loading data to db"))))
 
 ;; assume data is already loaded into db
 (def conn (d/get-conn "db"))
@@ -3263,34 +3267,30 @@
     (d/write-csv w [["Query Name" "Planning Time (ms)" "Execution Time (ms)"]])
     (doseq [q queries]
       (let [qname  (s/replace (name q) "q-" "")
-            _      (println "run" qname)
             query  (-> q (#(ns-resolve 'datalevin-bench.core %)) var-get)
-            result (d/explain {:run? true} query (d/db conn))]
+            result (d/explain {:run? true} query (d/db conn))
+            ]
         (d/write-csv w [[qname
-                         (:planning-time result)
+                         (:prepare-time result)
                          (:execution-time result)]]))))
   (d/close conn)
   (println "Done. Results are in " result-filename))
 
 (defn grid [&opts]
-  (doseq [f [2.5]
-          s [4.0]
-          v [2.0]
-          ]
+  (doseq [p [2.0]
+          v [5.0 6.0]
+          f [3.0]]
     (let [start (System/currentTimeMillis)]
       (doseq [q queries]
         (let [query (-> q (#(ns-resolve 'datalevin-bench.core %)) var-get)]
-          (binding [c/magic-cost-fidx          1.6
-                    c/magic-cost-pred          2.0
-                    c/magic-cost-var           4.5
-                    c/magic-cost-merge-scan-v  f
-                    c/magic-cost-val-eq-scan-e s
-                    c/magic-cost-init-scan-e   v
+          (binding [c/magic-cost-init-scan-e   p
+                    c/magic-cost-merge-scan-v  v
+                    c/magic-cost-val-eq-scan-e f
                     q/*cache?*                 false]
             (let [start (System/currentTimeMillis)]
               (d/q query (d/db conn))
               (println q "took" (- (System/currentTimeMillis) start))))))
-      (println "f" f "s" s  "v" v
+      (println "p" p "v" v "f" f
                (format
                  "%.2f"
                  (double (/ (- (System/currentTimeMillis) start) 1000))))))
@@ -3300,7 +3300,9 @@
 
   (time (d/analyze (d/db conn)))
 
-  (d/explain {:run? true} q-25c (d/db conn))
+  (d/explain {:run? true} q-10c (d/db conn))
+
+
 
   (def store (.-store (d/db conn)))
 
